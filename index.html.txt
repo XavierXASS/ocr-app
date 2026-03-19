@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Lector OCR de PDFs — v2 OFFLINE (estable)</title>
+<style>
+  :root{ --bg:#0f1221; --card:rgba(255,255,255,.08); --border:rgba(255,255,255,.12);
+         --text:#e8eeff; --muted:#aeb6d3; --accent:#33e0d3; --err:#ff6b6b; }
+  *{box-sizing:border-box} html,body{height:100%}
+  body{margin:0; font-family:Inter,Segoe UI,system-ui,Arial; color:var(--text);
+       background: radial-gradient(1100px 800px at 80% -20%, #241b49 0%, transparent 60%),
+                   radial-gradient(1000px 1000px at 0% 120%, #152a4f 0%, transparent 60%),
+                   linear-gradient(160deg, #0a0e1a 0%, #0f1221 100%);}
+  .wrap{max-width:960px; margin:0 auto; padding:16px}
+  h1{font-size:18px; margin:0}
+  .muted{color:var(--muted); font-size:13px}
+  .zone{margin-top:14px; padding:18px; border:1px dashed var(--border); border-radius:12px; background:rgba(255,255,255,.06)}
+  .zone.drag{border-color:var(--accent)}
+  .row{display:flex; gap:12px; flex-wrap:wrap; align-items:center}
+  button{appearance:none; border:0; border-radius:12px; padding:10px 14px; cursor:pointer; font-weight:700}
+  .primary{background:linear-gradient(180deg,#e7fff8,#b6fff0); color:#0a0e1a}
+  .ghost{background:rgba(255,255,255,.08); color:#eaf3ff; border:1px solid var(--border)}
+  .danger{background:linear-gradient(180deg,#ffecec,#ffcaca); color:#0a0e1a}
+  .badge{display:inline-block; padding:4px 8px; border-radius:999px; border:1px solid var(--border);
+         background:rgba(255,255,255,.1); font-size:12px}
+  .err{background:#ffd7d7; color:#2a0000; border-color:#ffb2b2}
+  footer{margin-top:10px; color:var(--muted); font-size:12px}
+  /* Overlay de progreso */
+  .overlay{position:fixed; inset:0; background:rgba(0,0,0,.65); display:none; place-items:center; z-index:50}
+  .panel{width:min(720px,95vw); background:rgba(20,24,44,.95); border:1px solid var(--border);
+         border-radius:16px; padding:16px}
+  .panel h2{margin:0 0 4px 0; font-size:18px}
+  .bar{height:10px; background:rgba(255,255,255,.1); border-radius:999px; overflow:hidden; margin:8px 0}
+  .bar>div{height:100%; background:linear-gradient(90deg,#36f2d5,#00c2ff); width:0%}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="row" style="justify-content:space-between">
+    <div>
+      <h1>📄 Lector OCR de PDFs — OFFLINE v2</h1>
+      <div id="diag" class="muted"></div>
+    </div>
+    <div class="row">
+      <button id="btnExportXlsx" class="ghost">⬇ Excel</button>
+      <button id="btnExportCsv"  class="ghost">⬇ CSV</button>
+      <button id="btnExportJson" class="ghost">⬇ JSON</button>
+      <button id="btnClear"      class="danger">🧹 Limpiar</button>
+    </div>
+  </header>
+
+  <section class="zone" id="drop">
+    <div class="row">
+      <input id="filePick" type="file" accept=".pdf,application/pdf" multiple style="display:none"/>
+      <button class="primary" id="btnPick">➕ Agregar PDFs</button>
+      <span class="muted">o arrástralos aquí (todo el lote de una vez)</span>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <label class="muted"><input type="checkbox" id="chkES" checked/> OCR en <b>español</b> (spa)</label>
+      <label class="muted"><input type="checkbox" id="chkEN"/> Incluir inglés (eng)</label>
+      <label class="muted">Workers OCR: <input type="number" id="numWorkers" min="1" max="2" value="1"
+          style="width:70px; padding:6px 8px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,.06); color:#fff"/></label>
+      <label class="muted">Backup cada <input type="number" id="backupEvery" min="5" max="50" value="10"
+          style="width:60px; padding:6px 8px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,.06); color:#fff"/> archivos
+          <input type="checkbox" id="backupDownload"/> descargar</label>
+      <button id="btnStart" class="primary">▶ Iniciar OCR (0)</button>
+    </div>
+  </section>
+
+  <footer>© App local • PDF.js • Tesseract.js • SheetJS — Si falta una librería, se mostrará ✖ y no podrás iniciar.</footer>
+</div>
+
+<!-- ====== LIBRERÍAS LOCALES (sin CDNs) ====== -->
+./libs/pdf.min.js</script>
+<script>
+  // PDF.js en modo sin worker para entornos restrictivos
+  if (window.pdfjsLib) { try { window.pdfjsLib.GlobalWorkerOptions.workerSrc = null; } catch {} }
+</script>
+./libs/tesseract.min.js</script>
+./libs/xlsx.full.min.js</script>
+
+<script>
+(() => {
+  // ===== Diagnóstico =====
+  const diag = document.getElementById('diag');
+  const chip = (ok,lib)=> ok? `<span class="badge">✓ ${lib}</span>`:`<span class="badge err">✖ ${lib} no cargó</span>`;
+  const okPdf=!!window.pdfjsLib, okOcr=!!window.Tesseract, okXlsx=!!window.XLSX;
+  const READY = (okPdf && okOcr && okXlsx);
+  diag.innerHTML = `Librerías: ${chip(okPdf,'PDF.js')} ${chip(okOcr,'Tesseract.js')} ${chip(okXlsx,'SheetJS')}`;
+  window.__READY__ = READY;
+
+  // ===== Estado/UI =====
+  const btnPick=document.getElementById('btnPick');
+  const filePick=document.getElementById('filePick');
+  const drop=document.getElementById('drop');
+  const btnStart=document.getElementById('btnStart');
+  const chkES=document.getElementById('chkES');
+  const chkEN=document.getElementById('chkEN');
+  const numWorkers=document.getElementById('numWorkers');
+  const backupEvery=document.getElementById('backupEvery');
+  const backupDownload=document.getElementById('backupDownload');
+
+  const btnExportXlsx=document.getElementById('btnExportXlsx');
+  const btnExportCsv=document.getElementById('btnExportCsv');
+  const btnExportJson=document.getElementById('btnExportJson');
+  const btnClear=document.getElementById('btnClear');
+
+  const queue=[];      // File[]
+  const results=[];    // registros
+  const errors=[];     // {file, message}
+  let startTime=0, processed=0, cancelFlag=false;
+  const LS_KEY='ocr_matriz_autosave_v2_off';
+
+  const refreshStartCaption = ()=> btnStart.textContent = `▶ Iniciar OCR (${queue.length})`;
+
+  // Overlay de progreso (único)
+  const overlay = document.createElement('div');
+  overlay.className='overlay';
+  overlay.innerHTML = `
+    <div class="panel">
+      <h2 id="ovTitle">Preparando…</h2>
+      <div class="muted" id="ovSub">Archivos: 0/0 · Tiempo: 00:00</div>
+      <div class="bar"><div id="ovBar" style="width:0%"></div></div>
+      <div class="row" style="justify-content:space-between">
+        <div class="muted" id="ovFile">—</div>
+        <button id="ovCancel" class="danger">Cancelar lote</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const ovTitle=document.getElementById('ovTitle');
+  const ovSub=document.getElementById('ovSub');
+  const ovBar=document.getElementById('ovBar');
+  const ovFile=document.getElementById('ovFile');
+  document.getElementById('ovCancel').onclick=()=>{ cancelFlag=true; };
+
+  const fmtTime = (ms)=>{ const s=Math.floor(ms/1000), m=Math.floor(s/60), h=Math.floor(m/60);
+    return (h>0?h+':':'')+String(m%60).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); };
+
+  // Prevención global de abrir pestañas al soltar PDFs fuera del área
+  ['dragenter','dragover','dragleave','drop'].forEach(evt=>{
+    window.addEventListener(evt, e=>{ e.preventDefault(); e.stopPropagation(); });
+    document.addEventListener(evt, e=>{ e.preventDefault(); e.stopPropagation(); });
+  });
+  drop.addEventListener('dragover', e=>{ e.preventDefault(); drop.classList.add('drag'); });
+  drop.addEventListener('dragleave', e=>{ e.preventDefault(); drop.classList.remove('drag'); });
+  drop.addEventListener('drop', e=>{ e.preventDefault(); drop.classList.remove('drag'); addToQueue(e.dataTransfer.files); });
+
+  btnPick.onclick = ()=> filePick.click();
+  filePick.onchange = ()=> addToQueue(filePick.files);
+
+  function addToQueue(fileList){
+    const arr=Array.from(fileList||[]).filter(f=> f && f.name.toLowerCase().endsWith('.pdf'));
+    arr.sort((a,b)=> a.name.localeCompare(b.name));
+    arr.forEach(f=> queue.push(f));
+    refreshStartCaption();
+  }
+
+  // OCR: 1–2 workers locales
+  let workers=[], langs='spa';
+  async function initWorkers(n){
+    if(workers.length) return;
+    langs = (chkES.checked && chkEN.checked) ? 'spa+eng' : (chkES.checked ? 'spa' : 'eng');
+    for(let i=0;i<n;i++){
+      const w = await Tesseract.createWorker(langs, 1, {
+        // Rutas LOCALES (carpeta libs/ y langs/)
+        workerPath: './libs/worker.min.js',
+        corePath:   './libs/tesseract-core.wasm.js',
+        langPath:   './langs',
+        logger: ()=>{}
+      });
+      workers.push(w);
+    }
+  }
+  async function termWorkers(){ for(const w of workers){ try{ await w.terminate(); }catch{} } workers=[]; }
+  async function ocrImage(imgData){
+    let w=null; while(!w){ w=workers.find(x=>!x._busy); if(!w) await new Promise(r=>setTimeout(r,50)); }
+    w._busy=true;
+    try{ const res=await w.recognize(imgData); return res.data.text||''; }
+    finally{ w._busy=false; }
+  }
+
+  // PDF render (sin worker de PDF.js)
+  async function renderPageToImage(pdf,num){
+    const page=await pdf.getPage(num);
+    const viewport=page.getViewport({ scale: 1.7 });
+    const canvas=document.createElement('canvas');
+    canvas.width=viewport.width; canvas.height=viewport.height;
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport, intent:'print' }).promise;
+    return canvas.toDataURL('image/png');
+  }
+
+  // Reglas de extracción
+  const RGX = {
+    fecha:/(\d{2}\/\d{2}\/\d{4})/,
+    facturaN:/(FACTURA[\s\n]*No\s*\.?:?\s*([0-9\-]+))|((?:FACTURA)\s+([0-9\-]{8,}))/i,
+    cpago:/COMPROBANTE\s+DE\s+PAGO\s*#\s*([0-9\- ]+)/i,
+    ccont:/COMPROBANTE\s+CONTABLE\s*#\s*([0-9\- ]+)/i,
+    retNum:/COMPROBANTE\s+DE\s+RETENCI[ÓO]N[\s\S]*?No\.\s*([0-9\-]+)/i,
+    subtotal15:/SUBTOTAL\s*:?\s*15%\s*([\d\.,]+)/i,
+    iva15:/IVA\s*15%\s*([\d\.,]+)/i,
+    total:/VALOR\s+TOTAL\s*\/?\s*([\d\.,]+)/i,
+    nombreLinea:/Beneficiario\s*:\s*(\d{10,13})\s*\n\s*([A-ZÁÉÍÓÚÑ0-9 .,&()\/\-]+)/,
+    retenIva100:/IVA\s*100\s*%|IMPUESTO\s*IVA\s*100\s*%/i,
+    retenRentaPct:/RENTA\s*\n?\s*([\d\.]+)\s*%/i,
+    retenRentaLinea:/RENTA[\s\S]*?\$\s*([\d\.,]+)/i,
+    retenIvaLinea:/IVA[\s\S]*?\$\s*([\d\.,]+)/i,
+    spiRefYMonto:/#\s*Ref\.?\s*BCE\s*\n?\s*([0-9]+)[\s\S]*?\n([0-9\.,]+)\n\s*(\d{10,13})?/i,
+    nomina:/\b(NOMINA|R[ÓO]L\s+DE\s+PAGOS?)\b/i
+  };
+  const toNum=s=>{ if(!s) return null; s=(s+'').replace(/\./g,'').replace(/,/g,'.'); const v=parseFloat(s); return isNaN(v)?null:v; };
+  const mergeRec=(a,b)=>{ const r={...a}; for(const k of Object.keys(b)){ if(b[k] && (!r[k]||(''+r[k]).trim()==='')) r[k]=b[k]; } return r; };
+
+  function parseText(t){
+    const r={};
+    const mcp=t.match(RGX.cpago); if(mcp) r.cpago=mcp[1]?.trim().replace(/\s+/g,'');
+    const fcp=t.match(/Fecha\s*:\s*Guayaquil,\s*(\d{2}\/\d{2}\/\d{4})/i) || t.match(RGX.fecha); if(fcp) r.f_cpago=fcp[1];
+    const mcc=t.match(RGX.ccont); if(mcc) r.ccont=mcc[1]?.trim().replace(/\s+/g,'');
+    const fcc=t.match(/COMPROBANTE\s+CONTABLE[\s\S]*?Fecha\s*:\s*([0-9A-Za-z ,]+?\d{4})/i); if(fcc) r.f_ccont=fcc[1].trim();
+    const mfac=t.match(RGX.facturaN); if(mfac) r.n_fact=(mfac[2]||mfac[4]||'').trim();
+    const ffa=t.match(/Fecha\s*Emisi[óo]n:\s*(\d{2}\/\d{2}\/\d{4})/i); if(ffa) r.f_fact=ffa[1];
+    const mnl=t.match(RGX.nombreLinea); if(mnl){ r.ruc=mnl[1]; r.nombre=mnl[2].trim(); }
+    const sb=t.match(RGX.subtotal15); if(sb) r.base=toNum(sb[1]);
+    const iv=t.match(RGX.iva15); if(iv) r.iva=toNum(iv[1]);
+    const tt=t.match(RGX.total); if(tt) r.total=toNum(tt[1]);
+    const rn=t.match(RGX.retNum); if(rn) r.n_ret=rn[1];
+    let ret=[]; if(RGX.retenIva100.test(t)) ret.push('IVA 100%'); const rr=t.match(RGX.retenRentaPct); if(rr) ret.push(`RENTA ${rr[1]}%`);
+    if(ret.length) r.ret_desc=ret.join(' ; ');
+    const rivaL=t.match(RGX.retenIvaLinea); if(rivaL) r.ret_iva_val=toNum(rivaL[1]);
+    const rrentaL=t.match(RGX.retenRentaLinea); if(rrentaL) r.ret_renta_val=toNum(rL[1]);
+    const sp=t.match(RGX.spiRefYMonto); if(sp){ r.spi_ref=sp[1]; r.spi=toNum(sp[2]); }
+    if(RGX.nomina.test(t)) r.tipo='NOMINA';
+    return r;
+  }
+  function finalizeRec(rec){
+    if(!rec.ruc){ const rr=(rec.__allText||'').match(/\bRUC\s*\.?:\s*(\d{13})/i); if(rr) rec.ruc=rr[1]; }
+    if(!rec.nombre && rec.ruc){
+      const lines=(rec.__allText||'').split(/\n/);
+      for(let i=0;i<lines.length;i++){ if(lines[i].includes(rec.ruc) && lines[i+1]){ rec.nombre=(rec.nombre||lines[i+1].trim()); break; } }
+    }
+    let rI=rec.ret_iva_val, rR=rec.ret_renta_val;
+    if(rI==null && rec.ret_desc && /IVA\s*100%/i.test(rec.ret_desc) && rec.iva!=null) rI=rec.iva;
+    if(rR==null && rec.ret_desc && /RENTA\s*([\d\.]+)%/i.test(rec.ret_desc) && rec.base!=null){
+      const pct=parseFloat(rec.ret_desc.match(/RENTA\s*([\d\.]+)%/i)[1]||'0'); rR=+(rec.base*(pct/100)).toFixed(2);
+    }
+    if(rec.total!=null && (rI!=null || rR!=null)) rec.pagar=+(rec.total-((rI||0)+(rR||0))).toFixed(2);
+    if(!rec.tipo) rec.tipo='GEN';
+    return rec;
+  }
+
+  const fmtMoney = v => (v===null||v===undefined||v==='') ? '' : (typeof v==='number'? v : parseFloat((v+'').replace(/,/g,''))).toFixed(2);
+  const fmtTime = (ms)=>{ const s=Math.floor(ms/1000), m=Math.floor(s/60), h=Math.floor(m/60);
+    return (h>0?h+':':'')+String(m%60).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); };
+
+  let startTime=0, processed=0, cancelFlag=false;
+  const queue=[], results=[], errors=[], LS_KEY='ocr_matriz_autosave_v2_off';
+
+  async function processAll(){
+    if(!window.__READY__){ alert('Falta una librería (PDF.js / Tesseract / SheetJS). No es posible iniciar.'); return; }
+    if(queue.length===0){ alert('No hay archivos en cola.'); return; }
+    const overlay=document.querySelector('.overlay'), ovTitle=document.getElementById('ovTitle'),
+          ovSub=document.getElementById('ovSub'), ovBar=document.getElementById('ovBar'), ovFile=document.getElementById('ovFile');
+    overlay.style.display='grid'; startTime=performance.now(); processed=0; errors.length=0; results.length=0; cancelFlag=false;
+
+    const nW=Math.min(Math.max(parseInt(document.getElementById('numWorkers').value||'1',10),1),2);
+    await initWorkers(nW);
+
+    const total=queue.length;
+    for(let i=0;i<total;i++){
+      if(cancelFlag) break;
+      const f=queue[i];
+      ovTitle.textContent=`Procesando ${i+1}/${total}`; ovFile.textContent=f.name; ovBar.style.width='0%';
+      ovSub.textContent=`Tiempo: ${fmtTime(performance.now()-startTime)} · Archivo ${i+1}/${total}`;
+      try{
+        const buf=await f.arrayBuffer();
+        const pdf=await pdfjsLib.getDocument({data:buf, disableWorker:true}).promise;
+        const pages=pdf.numPages; let rec={archivo:f.name, __allText:''};
+        for(let p=1;p<=pages;p++){
+          if(cancelFlag) break;
+          ovBar.style.width = Math.round(100*p/pages)+'%';
+          const img=await renderPageToImage(pdf,p);
+          const txt=(await ocrImage(img))||''; rec.__allText+='\n'+txt; rec=mergeRec(rec, parseText(txt));
+          ovSub.textContent=`Tiempo: ${fmtTime(performance.now()-startTime)} · Archivo ${i+1}/${total}`;
+        }
+        rec=finalizeRec(rec);
+        results.push({
+          'Archivo': rec.archivo||'','C. PAGO': rec.cpago||'','F. CPAGO': rec.f_cpago||'',
+          'C. CONTABLE': rec.ccont||'','F. CCONT': rec.f_ccont||'', 'RUC': rec.ruc||'','NOMBRE': rec.nombre||'',
+          'F. FACT': rec.f_fact||'','Nº FACT': rec.n_fact||'', 'BASE IMP.': rec.base ?? '',
+          'IVA 15%': rec.iva ?? '','TOTAL': rec.total ?? '', 'Nº RET': rec.n_ret||'','RET (%)': rec.ret_desc||'',
+          'TOTAL a pagar': rec.pagar ?? '','SPI': rec.spi ?? '','Ref. SPI': rec.spi_ref||'',
+          'TIPO_DOC': rec.tipo||'GEN','Observaciones': ''
+        });
+      }catch(e){ errors.push({file:f.name, message:e.message||String(e)}); }
+      processed++;
+      const K=Math.min(Math.max(parseInt(document.getElementById('backupEvery').value||'10',10),5),50);
+      try{ localStorage.setItem(LS_KEY, JSON.stringify({ts:Date.now(),results,errors,processed})); }catch{}
+      if(document.getElementById('backupDownload').checked && processed%K===0){
+        const blob=new Blob([JSON.stringify({results,errors},null,2)],{type:'application/json'});
+        const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`backup_${processed}.json`; a.click();
+        setTimeout(()=>URL.revokeObjectURL(a.href),500);
+      }
+    }
+    await termWorkers(); overlay.style.display='none'; queue.length=0; refreshStartCaption();
+    if(errors.length){
+      const blob=new Blob([JSON.stringify({errors},null,2)],{type:'application/json'});
+      const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='errores_ocr.json'; a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),500);
+      alert(`Lote finalizado con ${results.length} registros y ${errors.length} errores. Se descargó errores_ocr.json`);
+    }else{
+      alert(`Lote finalizado con ${results.length} registros.`);
+    }
+  }
+
+  // Helpers/Bindings
+  function refreshStartCaption(){ document.getElementById('btnStart').textContent=`▶ Iniciar OCR (${queue.length})`; }
+  function addToQueue(fileList){
+    const arr=Array.from(fileList||[]).filter(f=> f && f.name.toLowerCase().endsWith('.pdf'));
+    arr.sort((a,b)=> a.name.localeCompare(b.name));
+    arr.forEach(f=> queue.push(f)); refreshStartCaption();
+  }
+  ['dragenter','dragover','dragleave','drop'].forEach(evt=>{
+    window.addEventListener(evt, e=>{ e.preventDefault(); e.stopPropagation(); });
+    document.addEventListener(evt, e=>{ e.preventDefault(); e.stopPropagation(); });
+  });
+  drop.addEventListener('dragover', e=>{ e.preventDefault(); drop.classList.add('drag'); });
+  drop.addEventListener('dragleave', e=>{ e.preventDefault(); drop.classList.remove('drag'); });
+  drop.addEventListener('drop', e=>{ e.preventDefault(); drop.classList.remove('drag'); addToQueue(e.dataTransfer.files); });
+  btnPick.onclick=()=> filePick.click();
+  filePick.onchange=()=> addToQueue(filePick.files);
+  document.getElementById('btnStart').onclick=()=> processAll();
+
+  function ensureData(){ if(results.length===0){ alert('No hay resultados para exportar.'); return false; } return true; }
+  document.getElementById('btnExportXlsx').onclick=()=>{ if(!ensureData())return; const ws=XLSX.utils.json_to_sheet(results); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Matriz'); XLSX.writeFile(wb,'Matriz_OCR_PDFs.xlsx'); };
+  document.getElementById('btnExportCsv').onclick =()=>{ if(!ensureData())return; const h=Object.keys(results[0]); const rows=[h].concat(results.map(r=>h.map(k=>(r[k]??'').toString().replace(/"/g,'""')))); const csv=rows.map(r=>r.map(c=>`"${c}"`).join(',')).join('\n'); const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'})); a.download='Matriz_OCR_PDFs.csv'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),500); };
+  document.getElementById('btnExportJson').onclick=()=>{ if(!ensureData())return; const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([JSON.stringify(results,null,2)],{type:'application/json'})); a.download='Matriz_OCR_PDFs.json'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),500); };
+  document.getElementById('btnClear').onclick=()=>{ if(!confirm('¿Limpiar cola y resultados?')) return; queue.length=0; results.length=0; errors.length=0; processed=0; localStorage.removeItem(LS_KEY); refreshStartCaption(); alert('Listo.'); };
+
+  // PDF helpers
+  async function renderPageToImage(pdf,num){
+    const page=await pdf.getPage(num);
+    const viewport=page.getViewport({ scale: 1.7 });
+    const canvas=document.createElement('canvas');
+    canvas.width=viewport.width; canvas.height=viewport.height;
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport, intent:'print' }).promise;
+    return canvas.toDataURL('image/png');
+  }
+  let workers=[];
+  async function initWorkers(n){
+    if(workers.length)return;
+    const langs=(document.getElementById('chkES').checked && document.getElementById('chkEN').checked)?'spa+eng':(document.getElementById('chkES').checked?'spa':'eng');
+    for(let i=0;i<n;i++){
+      const w=await Tesseract.createWorker(langs,1,{workerPath:'./libs/worker.min.js',corePath:'./libs/tesseract-core.wasm.js',langPath:'./langs',logger:()=>{}});
+      workers.push(w);
+    }
+  }
+  async function termWorkers(){ for(const w of workers){ try{ await w.terminate(); }catch{} } workers=[]; }
+  async function ocrImage(imgData){ let w=null; while(!w){ w=workers.find(x=>!x._busy); if(!w) await new Promise(r=>setTimeout(r,50)); } w._busy=true; try{ const res=await w.recognize(imgData); return res.data.text||''; } finally{ w._busy=false; } }
+})();
+</script>
+</body>
+</html>
